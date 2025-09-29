@@ -34,6 +34,7 @@ local currentTool = nil
 local activatedConnection = nil
 local currentEffectiveCooldown = 0
 local isInitialized = false
+local showFovToUser = false  -- Updated via remote command
 
 -- FOV Circle (Drawing)
 local fovCircle = nil
@@ -48,9 +49,6 @@ local function createDrawingCircle()
 	circle.Visible = false
 	return circle
 end
-
--- FOV Circle Visibility Control
-local showFovToUser = false  -- Updated via remote command
 
 local function updateFOVCircle()
 	if not fovCircle then return end
@@ -215,6 +213,7 @@ local function findClosestEnemy()
 	for _, targetPlayer in pairs(Players:GetPlayers()) do
 		if targetPlayer ~= player and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") and targetPlayer.Character:FindFirstChildOfClass("Humanoid") then
 			local targetChar = targetPlayer.Character
+			local targetRoot = targetChar.HumanoidRootPart
 			local targetHumanoid = targetChar:FindFirstChildOfClass("Humanoid")
 			local targetTeam = targetPlayer.Team
 			local isActualOpponent = false
@@ -265,7 +264,6 @@ local function shoot()
 
 	local toolAtDecision = tool
 	local fireSoundAtDecision = tool:FindFirstChild("Fire")
-	local bulletTypeAtDecision = tool:GetAttribute("BulletType")
 	local startPosAtDecision
 	local muzzleAttach = tool:FindFirstChild("Muzzle", true)
 	if muzzleAttach and muzzleAttach:IsA("Attachment") then
