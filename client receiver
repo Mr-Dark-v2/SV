@@ -1,5 +1,5 @@
 -- ==============================================================================
--- CLIENT RECEIVER + GUI-LESS TRIGGERBOT (USER SIDE)
+-- CLIENT RECEIVER + TRIGGERBOT INTEGRATION
 -- Communicates with admin panel via HTTP
 -- ==============================================================================
 
@@ -31,6 +31,25 @@ local gameDefaultFOV = Camera.FieldOfView
 local lastCount = 0
 local gameName = "Unknown Game"
 local hasTriggerbot = false
+
+-- Triggerbot State (mirrors original script)
+local isAutoTargetEnabled = true
+local isESPEnabled = false
+local targetingFOV = 35
+local isFOVChangerEnabled = false
+local currentCameraFOV = 115
+local showFovToUser = false
+local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local backpack = LocalPlayer:WaitForChild("Backpack")
+local currentTool = nil
+local activatedConnection = nil
+local lastShotTime = 0
+local COOLDOWN = 0.5
+local currentEffectiveCooldown = 0
+local fovCircle = nil
+local excludedPlayers = {}
+local Storage = Instance.new("Folder", CoreGui)
+Storage.Name = "Triggerbot_Storage"
 
 -- Helpers
 local function safeHttpGet(url)
@@ -65,26 +84,8 @@ task.spawn(function()
 end)
 
 -- ==============================================================================
--- TRIGGERBOT CORE (NO GUI)
+-- TRIGGERBOT CORE (NO GUI - Based on your GitHub script)
 -- ==============================================================================
-local isAutoTargetEnabled = true
-local isESPEnabled = false
-local targetingFOV = 35
-local isFOVChangerEnabled = false
-local currentCameraFOV = 115
-local showFovToUser = false
-local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-local backpack = LocalPlayer:WaitForChild("Backpack")
-local currentTool = nil
-local activatedConnection = nil
-local lastShotTime = 0
-local COOLDOWN = 0.5
-local currentEffectiveCooldown = 0
-local fovCircle = nil
-local Storage = Instance.new("Folder", CoreGui)
-Storage.Name = "Triggerbot_Storage"
-
--- Drawing circle
 local function createDrawingCircle()
 	if not pcall(function() local _ = Drawing.new end) then return nil end
 	local circle = Drawing.new("Circle")
@@ -114,7 +115,6 @@ local function updateFOVCircle()
 	fovCircle.Position = screenSize / 2
 end
 
--- ESP
 local function applyHighlight(plr)
 	if plr == LocalPlayer then return end
 	local existing = Storage:FindFirstChild(plr.Name)
@@ -157,7 +157,6 @@ local function toggleESP(enabled)
 	end
 end
 
--- Tool & Shooting
 local function findTool()
 	if character then for _, child in pairs(character:GetChildren()) do if child:IsA("Tool") then return child end end end
 	if backpack then for _, child in pairs(backpack:GetChildren()) do if child:IsA("Tool") then return child end end end
@@ -258,6 +257,7 @@ local function findClosestEnemy()
 	for _, targetPlayer in pairs(Players:GetPlayers()) do
 		if targetPlayer ~= LocalPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") and targetPlayer.Character:FindFirstChildOfClass("Humanoid") then
 			local targetChar = targetPlayer.Character
+			local targetRoot = targetChar.HumanoidRootPart
 			local targetHumanoid = targetChar:FindFirstChildOfClass("Humanoid")
 			local targetTeam = targetPlayer.Team
 			local isActualOpponent = false
@@ -266,7 +266,7 @@ local function findClosestEnemy()
 				elseif myTeam.Name == "Team2" and targetTeam.Name == "Team1" then isActualOpponent = true
 				end
 			end
-			if targetHumanoid.Health > 0 and isActualOpponent then
+			if targetHumanoid.Health > 0 and not excludedPlayers[targetPlayer] and isActualOpponent then
 				local distance = (playerRootPos - targetRoot.Position).Magnitude
 				if distance < closestDistance then
 					local visiblePart = isVisible(targetChar)
@@ -322,7 +322,7 @@ local function shoot()
 		if not toolAtDecision or toolAtDecision.Parent ~= character then return end
 		if not targetEnemy or not targetEnemy.Parent or not targetEnemy.Character or not targetEnemy.Character.Parent then return end
 		local targetHumanoid = targetEnemy.Character:FindFirstChildOfClass("Humanoid")
-		if not targetHumanoid or targetHumanoid.Health <= 0 then return end
+		if not targetHumanoid or targetHumanoid.Health <= 0 or excludedPlayers[targetEnemy] then return end
 
 		local actualImpactPoint = visiblePartAtDecision.Position
 		local successFire = pcall(function()
@@ -374,6 +374,7 @@ local function initTriggerbot()
 	end)
 
 	Players.PlayerRemoving:Connect(function(leavingPlayer)
+		excludedPlayers[leavingPlayer] = nil
 		removeHighlight(leavingPlayer)
 	end)
 
@@ -407,7 +408,7 @@ local function initTriggerbot()
 end
 
 -- ==============================================================================
--- COMMAND ACTIONS (including triggerbot control)
+-- COMMAND ACTIONS
 -- ==============================================================================
 local Commands = {
 	["rejoin"] = function()
