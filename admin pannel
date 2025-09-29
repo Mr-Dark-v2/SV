@@ -1,5 +1,5 @@
 -- ==============================================================================
--- ADMIN PANEL WITH TRIGGERBOT SETTINGS GUI
+-- ADMIN PANEL WITH TRIGGERBOT INTEGRATION
 -- ==============================================================================
 
 -- [!] CONFIGURE THESE URLS TO MATCH YOUR WEB SERVER
@@ -295,16 +295,39 @@ local CommandListLayout = Instance.new("UIListLayout", CommandFrame)
 CommandListLayout.Padding = UDim.new(0, 5)
 CommandListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 
+-- Scripts Section
+local ScriptsHeader = Instance.new("TextLabel", CommandFrame)
+ScriptsHeader.Name = "ScriptsHeader"
+ScriptsHeader.Size = UDim2.new(1, 0, 0, 20)
+ScriptsHeader.Text = "Scripts"
+ScriptsHeader.Font = Enum.Font.SourceSansBold
+ScriptsHeader.TextColor3 = Theme.Colors.Text
+ScriptsHeader.TextSize = 16
+ScriptsHeader.BackgroundTransparency = 1
+ScriptsHeader.TextXAlignment = Enum.TextXAlignment.Center
+ScriptsHeader.LayoutOrder = 0
+
+local ScriptsFrame = Instance.new("Frame", CommandFrame)
+ScriptsFrame.BackgroundTransparency = 1
+ScriptsFrame.Size = UDim2.new(1,0,0,0)
+ScriptsFrame.AutomaticSize = Enum.AutomaticSize.Y
+ScriptsFrame.LayoutOrder = 1
+
+local ScriptsLayout = Instance.new("UIGridLayout", ScriptsFrame)
+ScriptsLayout.CellPadding = UDim2.new(0, 5, 0, 5)
+local buttonWidth = (222 - 5) / 2
+ScriptsLayout.CellSize = UDim2.new(0, math.floor(buttonWidth), 0, 35)
+ScriptsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
 -- Targeted Commands
 local TargetedCommandsFrame = Instance.new("Frame", CommandFrame)
 TargetedCommandsFrame.BackgroundTransparency = 1
 TargetedCommandsFrame.Size = UDim2.new(1,0,0,0)
 TargetedCommandsFrame.AutomaticSize = Enum.AutomaticSize.Y
-TargetedCommandsFrame.LayoutOrder = 1
+TargetedCommandsFrame.LayoutOrder = 2
 
 local CommandLayout = Instance.new("UIGridLayout", TargetedCommandsFrame)
 CommandLayout.CellPadding = UDim2.new(0, 5, 0, 5)
-local buttonWidth = (222 - 5) / 2
 CommandLayout.CellSize = UDim2.new(0, math.floor(buttonWidth), 0, 35)
 CommandLayout.SortOrder = Enum.SortOrder.LayoutOrder
 
@@ -318,20 +341,20 @@ UniversalHeaderLabel.TextColor3 = Theme.Colors.TextSubtle
 UniversalHeaderLabel.TextSize = 14
 UniversalHeaderLabel.BackgroundTransparency = 1
 UniversalHeaderLabel.TextXAlignment = Enum.TextXAlignment.Center
-UniversalHeaderLabel.LayoutOrder = 2
+UniversalHeaderLabel.LayoutOrder = 3
 
 local SeparatorFrame = Instance.new("Frame", CommandFrame)
 SeparatorFrame.Size = UDim2.new(1, -10, 0, 1)
 SeparatorFrame.Position = UDim2.new(0, 5, 0, 0)
 SeparatorFrame.BackgroundColor3 = Theme.Colors.Separator
 SeparatorFrame.BorderSizePixel = 0
-SeparatorFrame.LayoutOrder = 3
+SeparatorFrame.LayoutOrder = 4
 
 local UniversalCommandsFrame = Instance.new("Frame", CommandFrame)
 UniversalCommandsFrame.BackgroundTransparency = 1
 UniversalCommandsFrame.Size = UDim2.new(1,0,0,0)
 UniversalCommandsFrame.AutomaticSize = Enum.AutomaticSize.Y
-UniversalCommandsFrame.LayoutOrder = 4
+UniversalCommandsFrame.LayoutOrder = 5
 
 local UniversalCommandLayout = Instance.new("UIGridLayout", UniversalCommandsFrame)
 UniversalCommandLayout.CellPadding = UDim2.new(0, 5, 0, 5)
@@ -1090,10 +1113,14 @@ local Commands = {
 	{name="rejoin", order=10},
 	{name="kick", args={"Enter Kick Message:", "Default: Kicked by Admin"}, order=11},
 	{name="um", text="Message", args={"Enter Message:", "Duration (optional):"}, order=12},
-	{name="use", text="Execute", args={"Enter Script URL:"}, order=13},
 	{name="blockchat", text="Block Chat", order=14},
 	{name="unblockchat", text="Unblock Chat", order=15},
 	{name="sendchat", text="Send Chat", args={"Enter chat message:", "Message..."}, order=16}
+}
+
+-- Scripts
+local Scripts = {
+	{name="triggerbot", text="Triggerbot", url="https://raw.githubusercontent.com/Mr-Dark-v2/SV/refs/heads/main/admin%20sv%20triggerbot", order=1}
 }
 
 function createCommandButtons()
@@ -1162,6 +1189,19 @@ function createCommandButtons()
 		connectButton(targetedBtn, cmdData, false)
 		local universalBtn = createButton(cmdData, UniversalCommandsFrame)
 		connectButton(universalBtn, cmdData, true)
+	end
+
+	-- Scripts
+	for _, scriptData in ipairs(Scripts) do
+		local scriptBtn = createButton(scriptData, ScriptsFrame)
+		scriptBtn.MouseButton1Click:Connect(function()
+			if not selectedPlayerInfo then
+				showNotification("No player selected!", 3)
+				return
+			end
+			sendMessageToServer({cmd = "use", target = selectedPlayerInfo.userId, args = {scriptData.url}})
+			showNotification("Script execution command sent!", 2)
+		end)
 	end
 end
 
