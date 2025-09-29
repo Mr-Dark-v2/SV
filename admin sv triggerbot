@@ -1,0 +1,339 @@
+-- SV_Triggerbot.lua (Headless Streaming Version)
+-- This version has NO GUI and is controlled entirely by the API functions.
+
+SV_API = {}
+
+--[[ ============================ CONFIG & STATE ============================ ]]
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Camera = workspace.CurrentCamera
+local Debris = game:GetService("Debris")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local backpack = player:WaitForChild("Backpack")
+
+-- Core State Variables (to be controlled by the API)
+local isAutoTargetEnabled = true
+local isESPEnabled = false
+local targetingFOV = 90
+local currentDelayMode = "Blatant" -- "Blatant" or "Normal"
+local shootDelayMilliseconds = 0
+local isFOVChangerEnabled = false
+local currentCameraFOV = 70
+local isUserFovCircleVisible = false
+local excludedPlayers = {}
+
+-- Internal State
+local lastShotTime = 0
+local COOLDOWN = 0.5
+local currentTool = nil
+local fovCircle = nil -- For user visibility
+local gameDefaultFOV = Camera.FieldOfView
+local Storage = Instance.new("Folder", game:GetService("CoreGui"))
+Storage.Name = "TheMist_SV_Storage_"..math.random(1, 1e6)
+local activeConnections = {}
+
+
+--[[ =============================== API ================================== ]]
+-- These functions are designed to be called by the client receiver script.
+
+function SV_API:ToggleAutoTarget(enabled)
+    isAutoTargetEnabled = (enabled == true)
+end
+
+function SV_API:ToggleESP(enabled)
+    isESPEnabled = (enabled == true)
+    for _, child in ipairs(Storage:GetChildren()) do
+        if child:IsA("Highlight") then
+            child.Enabled = isESPEnabled
+        end
+    end
+end
+
+function SV_API:SetTargetingFOV(value)
+    targetingFOV = tonumber(value) or 90
+end
+
+function SV_API:SetDelayMode(mode)
+    if mode == "Blatant" or mode == "Normal" then
+        currentDelayMode = mode
+        shootDelayMilliseconds = (mode == "Blatant") and 0 or 0
+    end
+end
+
+function SV_API:ToggleCameraFOVChanger(enabled)
+    isFOVChangerEnabled = (enabled == true)
+    if not isFOVChangerEnabled then
+        pcall(function() Camera.FieldOfView = gameDefaultFOV end)
+    else
+        pcall(function() Camera.FieldOfView = currentCameraFOV end)
+    end
+end
+
+function SV_API:SetCameraFOV(value)
+    currentCameraFOV = tonumber(value) or 70
+    if isFOVChangerEnabled then
+        pcall(function() Camera.FieldOfView = currentCameraFOV end)
+    end
+end
+
+function SV_API:ResetCameraFOV()
+    currentCameraFOV = gameDefaultFOV
+    if isFOVChangerEnabled then
+        pcall(function() Camera.FieldOfView = gameDefaultFOV end)
+    end
+end
+
+function SV_API:TogglePlayerExclusion(targetPlayerName)
+    local targetPlayer = Players:FindFirstChild(targetPlayerName)
+    if targetPlayer then
+        excludedPlayers[targetPlayer] = not excludedPlayers[targetPlayer]
+    end
+end
+
+function SV_API:SetUserFovCircleVisible(visible)
+    isUserFovCircleVisible = (visible == true)
+end
+
+function SV_API:Deactivate()
+    print("Deactivating SV Triggerbot...")
+	for _, connection in ipairs(activeConnections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    activeConnections = {}
+    
+    pcall(function() if Camera then Camera.FieldOfView = gameDefaultFOV end end)
+	pcall(function() if currentTool and not currentTool.Enabled then currentTool.Enabled = true end end)
+    
+    if Storage and Storage.Parent then Storage:Destroy() end
+    if fovCircle then fovCircle:Destroy(); fovCircle = nil end
+    
+    print("SV Triggerbot deactivated successfully.")
+    SV_API = nil
+end
+
+
+--[[ ========================== CORE LOGIC (NO GUI) ========================= ]]
+
+local BulletRenderer_upvr = nil
+pcall(function()
+	local modulesFolder = ReplicatedStorage:FindFirstChild("Modules")
+	if modulesFolder and modulesFolder:FindFirstChild("BulletRenderer") then
+		BulletRenderer_upvr = require(modulesFolder.BulletRenderer)
+	end
+end)
+
+function createDrawingCircle()
+	if not pcall(function() local _ = Drawing.new end) then return nil end
+	local circle = Drawing.new("Circle")
+	circle.Thickness = 2; circle.Color = Color3.fromRGB(128, 0, 128);
+	circle.Transparency = 0.5; circle.Filled = false;
+	circle.NumSides = 64; circle.Visible = false;
+	return circle
+end
+
+function updateFOVCircle()
+	if not fovCircle then return end
+	fovCircle.Visible = isUserFovCircleVisible
+	if not fovCircle.Visible then return end
+	
+	local screenSize = Camera.ViewportSize
+	if not screenSize or screenSize.X == 0 then fovCircle.Visible = false; return end
+	fovCircle.Position = screenSize / 2
+	local fovRad = math.rad(targetingFOV / 2)
+	local camFovRad = math.rad(Camera.FieldOfView / 2)
+	if fovRad <= 0 or camFovRad <= 0 or math.tan(camFovRad) == 0 then fovCircle.Visible = false; return end
+	local radius = (screenSize.Y / 2) * math.tan(fovRad) / math.tan(camFovRad)
+	fovCircle.Radius = math.max(0, radius)
+end
+
+function applyHighlight(plr)
+	if plr == player then return end
+	local existing = Storage:FindFirstChild(plr.Name)
+	if existing then existing:Destroy() end
+	local highlight = Instance.new("Highlight", Storage); highlight.Name = plr.Name;
+	highlight.FillColor = plr.Team and plr.Team.TeamColor.Color or Color3.fromRGB(255, 255, 255);
+	highlight.FillTransparency = 0.5; highlight.OutlineColor = Color3.fromRGB(255, 255, 255);
+	highlight.OutlineTransparency = 0; highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop;
+	highlight.Enabled = isESPEnabled
+	if plr.Character then highlight.Adornee = plr.Character end
+	table.insert(activeConnections, plr.CharacterAdded:Connect(function(char) if highlight and highlight.Parent then highlight.Adornee = char end end))
+	table.insert(activeConnections, plr.CharacterRemoving:Connect(function() if highlight and highlight.Parent then highlight.Adornee = nil end end))
+end
+
+function removeHighlight(plr)
+	if plr then
+		local existing = Storage:FindFirstChild(plr.Name)
+		if existing then existing:Destroy() end
+	end
+end
+
+function calculateEffectiveCooldown(toolInstance)
+	if not toolInstance or not toolInstance:IsA("Tool") then return COOLDOWN end
+	local gameCooldown = toolInstance:GetAttribute("Cooldown")
+	return (type(gameCooldown) == "number" and gameCooldown > 0) and gameCooldown or COOLDOWN
+end
+
+function getShootEvent()
+	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+	return remotes and remotes:FindFirstChild("ShootGun")
+end
+
+function findTool()
+	if character then for _, child in pairs(character:GetChildren()) do if child:IsA("Tool") then return child end end end
+	if backpack then for _, child in pairs(backpack:GetChildren()) do if child:IsA("Tool") then return child end end end
+	return nil
+end
+
+function isVisible(targetCharacter)
+	if not character or not character:FindFirstChild("HumanoidRootPart") then return nil end
+	local startPos = character.HumanoidRootPart.Position
+	local priorityParts = {"HumanoidRootPart", "LeftHand", "RightHand", "LeftFoot", "RightFoot", "Head"}
+	local raycastParams = RaycastParams.new(); raycastParams.FilterDescendantsInstances = {character, Storage};
+	raycastParams.FilterType = Enum.RaycastFilterType.Blacklist; raycastParams.IgnoreWater = true
+	for _, partName in pairs(priorityParts) do
+		local targetPart = targetCharacter:FindFirstChild(partName)
+		if targetPart and targetPart:IsA("BasePart") then
+			local direction = (targetPart.Position - startPos)
+			if direction.Magnitude > 0.1 then
+				local rayResult = workspace:Raycast(startPos, direction, raycastParams)
+				if rayResult and rayResult.Instance:IsDescendantOf(targetCharacter) then return targetPart end
+			end
+		end
+	end
+	return nil
+end
+
+function isWithinFOV(targetPart)
+	if not character or not character:FindFirstChild("HumanoidRootPart") then return false end
+	local cameraCFrame = Camera.CFrame
+	local vector = cameraCFrame:VectorToObjectSpace(targetPart.Position - cameraCFrame.Position)
+	local angle = math.atan2(vector.X, -vector.Z)
+	return math.deg(angle) <= targetingFOV / 2
+end
+
+function setupToolListener(toolInstance)
+	local existingConnection = table.find(activeConnections, activatedConnection)
+	if existingConnection then table.remove(activeConnections, existingConnection) end
+	if activatedConnection then activatedConnection:Disconnect(); activatedConnection = nil end
+	
+	if currentTool and currentTool ~= toolInstance and not currentTool.Enabled then pcall(function() currentTool.Enabled = true end) end
+	currentTool = toolInstance
+	if toolInstance and toolInstance:IsA("Tool") then
+		local cooldownActive = currentEffectiveCooldown > 0 and (tick() - lastShotTime < currentEffectiveCooldown)
+		pcall(function() toolInstance.Enabled = not cooldownActive end)
+		activatedConnection = toolInstance.Activated:Connect(function()
+			lastShotTime = tick()
+			currentEffectiveCooldown = calculateEffectiveCooldown(toolInstance)
+			if toolInstance then pcall(function() toolInstance.Enabled = false end) end
+		end)
+		table.insert(activeConnections, activatedConnection)
+	else
+		currentEffectiveCooldown = 0
+	end
+end
+
+function findClosestEnemy()
+	local maxDistance = 400; local closestEnemy, closestVisiblePart, closestDistance = nil, nil, maxDistance
+	local playerRootPart = character and character:FindFirstChild("HumanoidRootPart")
+	if not playerRootPart then return nil, nil end
+	local playerRootPos = playerRootPart.Position; local myTeam = player.Team
+	if not myTeam then return nil, nil end
+	for _, targetPlayer in pairs(Players:GetPlayers()) do
+		if targetPlayer ~= player and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") and targetPlayer.Character:FindFirstChildOfClass("Humanoid") then
+			local targetChar = targetPlayer.Character; local targetHumanoid = targetChar:FindFirstChildOfClass("Humanoid")
+			local isActualOpponent = (myTeam.Name == "Team1" and targetPlayer.Team.Name == "Team2") or (myTeam.Name == "Team2" and targetPlayer.Team.Name == "Team1")
+			if targetHumanoid.Health > 0 and not excludedPlayers[targetPlayer] and isActualOpponent then
+				local distance = (playerRootPos - targetChar.HumanoidRootPart.Position).Magnitude
+				if distance < closestDistance then
+					local visiblePart = isVisible(targetChar)
+					if visiblePart and isWithinFOV(targetChar.HumanoidRootPart) then
+						closestDistance = distance; closestEnemy = targetPlayer; closestVisiblePart = visiblePart
+					end
+				end
+			end
+		end
+	end
+	return closestEnemy, closestVisiblePart
+end
+
+function shoot()
+	if not isAutoTargetEnabled or not character or not character.Parent or not character:FindFirstChild("HumanoidRootPart") then return end
+	local tool = currentTool
+	if not tool or tool.Parent ~= character then tool = findTool(); if tool and tool.Parent == character then setupToolListener(tool) else return end end
+	local shootEvent = getShootEvent()
+	if not shootEvent then return end
+	local effectiveCooldown = calculateEffectiveCooldown(tool)
+	if tick() - lastShotTime < effectiveCooldown then return end
+	local targetEnemy, visiblePart = findClosestEnemy()
+	if not visiblePart or not targetEnemy or not targetEnemy.Character then return end
+	lastShotTime = tick(); currentEffectiveCooldown = effectiveCooldown
+	local toolAtDecision, fireSoundAtDecision = tool, tool:FindFirstChild("Fire")
+	local bulletTypeAtDecision = tool:GetAttribute("BulletType"); local startPosAtDecision
+	local muzzleAttach = tool:FindFirstChild("Muzzle", true)
+	if muzzleAttach and muzzleAttach:IsA("Attachment") then startPosAtDecision = muzzleAttach.WorldPosition else startPosAtDecision = (tool:FindFirstChild("Handle") and tool.Handle.Position) or character.HumanoidRootPart.Position end
+	
+	task.spawn(function()
+		if shootDelayMilliseconds > 0 then task.wait(shootDelayMilliseconds / 1000) end
+		if not toolAtDecision or toolAtDecision.Parent ~= character or not targetEnemy or not targetEnemy.Parent or not targetEnemy.Character or not targetEnemy.Character.Parent then return end
+		local targetHumanoid = targetEnemy.Character:FindFirstChildOfClass("Humanoid")
+		if not targetHumanoid or targetHumanoid.Health <= 0 or excludedPlayers[targetEnemy] then return end
+		
+		local fireArgs, endPointForVisuals = {}, nil
+		if currentDelayMode == "Blatant" then
+			local actualHitPart = isVisible(targetEnemy.Character) or targetEnemy.Character:FindFirstChild("HumanoidRootPart")
+			if not actualHitPart then return end
+			endPointForVisuals = actualHitPart.Position; fireArgs = {startPosAtDecision, endPointForVisuals, actualHitPart, endPointForVisuals}
+		else
+			endPointForVisuals = visiblePart.Position; fireArgs = {startPosAtDecision, endPointForVisuals, nil, nil}
+		end
+		
+		if pcall(function() shootEvent:FireServer(unpack(fireArgs)) end) then
+			if fireSoundAtDecision then pcall(function() fireSoundAtDecision:Play() end) end
+			if BulletRenderer_upvr and muzzleAttach and endPointForVisuals then pcall(BulletRenderer_upvr, startPosAtDecision, endPointForVisuals, bulletTypeAtDecision) end
+			pcall(function() toolAtDecision:Activate() end)
+		end
+	end)
+end
+
+--[[ ========================== INITIALIZATION ========================== ]]
+local function Initialize()
+    fovCircle = createDrawingCircle()
+
+    local function setupPlayerListeners(p)
+        if p == player then return end
+        if isESPEnabled then applyHighlight(p) end
+    end
+    table.insert(activeConnections, Players.PlayerAdded:Connect(setupPlayerListeners))
+    table.insert(activeConnections, Players.PlayerRemoving:Connect(function(p) excludedPlayers[p] = nil; removeHighlight(p) end))
+    for _, p in pairs(Players:GetPlayers()) do setupPlayerListeners(p) end
+
+    local function onCharacter(newChar)
+        character = newChar
+        task.wait(0.2)
+        backpack = player:WaitForChild("Backpack", 5)
+        setupToolListener(findTool())
+        table.insert(activeConnections, newChar.ChildAdded:Connect(function(child) if child:IsA("Tool") then setupToolListener(child) end end))
+        table.insert(activeConnections, newChar.ChildRemoved:Connect(function(child) if child == currentTool then setupToolListener(nil) end end))
+    end
+    table.insert(activeConnections, player.CharacterAdded:Connect(onCharacter))
+    if character then onCharacter(character) end
+
+    table.insert(activeConnections, RunService.RenderStepped:Connect(function()
+        if not character or not character.Parent then character = player.Character; if not character then return end end
+        local equippedTool = character and character:FindFirstChildOfClass("Tool")
+        if equippedTool ~= currentTool then setupToolListener(equippedTool) end
+        if currentTool and not currentTool.Enabled and currentEffectiveCooldown > 0 and tick() - lastShotTime >= currentEffectiveCooldown then
+            pcall(function() currentTool.Enabled = true end); currentEffectiveCooldown = 0
+        end
+        pcall(updateFOVCircle); pcall(shoot)
+    end))
+end
+
+-- Run initializer in a protected call
+if not pcall(Initialize) then
+    warn("SV Triggerbot failed to initialize.")
+    if SV_API and SV_API.Deactivate then SV_API:Deactivate() end
+end
