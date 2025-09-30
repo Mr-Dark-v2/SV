@@ -1,119 +1,58 @@
--- The Mist - Network Controlled Silent Module V1
--- This script runs silently and listens for commands from a remote server.
+-- The Mist - Silent Background Module (Integrated with Network Control)
+-- GUI has been removed for silent operation. Default settings are active.
+-- Network control integration added.
 
---==============================================================================
---|| CONFIGURATION
---==============================================================================
--- [!] CONFIGURE THESE URLS TO MATCH YOUR WEB SERVER
-local SERVER_READ_URL  = "https://8775b734-9c08-4b7f-932a-e8df8538b275-00-1xt67y1hms2uu.kirk.replit.dev/read"
-local SERVER_SEND_URL  = "https://8775b734-9c08-4b7f-932a-e8df8538b275-00-1xt67y1hms2uu.kirk.replit.dev/send"
-
--- [!] TIMING CONFIGURATION
-local HEARTBEAT_INTERVAL = 3 -- How often (in seconds) to send status to the server.
-local POLL_INTERVAL = 0.3    -- How often to check for new commands.
-
---==============================================================================
---|| SERVICES
---==============================================================================
-local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local CoreGui = game:GetService("CoreGui")
-local MarketplaceService = game:GetService("MarketplaceService")
+local UserInputService = game:GetService("UserInputService")
 local Debris = game:GetService("Debris")
+local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
 
---==============================================================================
---|| PLAYER & CHARACTER REFERENCES
---==============================================================================
+-- Core Services and Player/Character references
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 local backpack = player:WaitForChild("Backpack")
 local Camera = workspace.CurrentCamera
-local Storage = Instance.new("Folder", CoreGui)
-Storage.Name = "TheMist_Storage_Silent_V1"
 
---==============================================================================
---|| TRIGGERBOT SETTINGS (Default values, remotely configurable)
---==============================================================================
-local isAutoTargetEnabled = true
-local isESPEnabled = false -- Defaulted to off for silent operation
-local COOLDOWN = 0.5
+-- Network Configuration (Copied from Command Receiver)
+local SERVER_READ_URL  = "https://8775b734-9c08-4b7f-932a-e8df8538b275-00-1xt67y1hms2uu.kirk.replit.dev/read"
+local SERVER_SEND_URL  = "https://8775b734-9c08-4b7f-932a-e8df8538b275-00-1xt67y1hms2uu.kirk.replit.dev/send"
+local HEARTBEAT_INTERVAL = 3 -- How often (in seconds) to send status to the server.
+local POLL_INTERVAL = 0.3    -- How often to check for new commands.
+
+-- State & Helpers (Copied from Command Receiver)
+local lastCount = 0
+local gameName = "Unknown Game"
+local function safeHttpGet(url) local ok, res = pcall(function() return game:HttpGet(url) end); if ok and res then return true, res end; return false, res end
+local function safeJsonDecode(s) local ok, res = pcall(function() return HttpService:JSONDecode(s) end); if ok then return res end; return nil end
+
+-- Fetch Game Name (Copied from Command Receiver)
+task.spawn(function()
+    local success, result = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
+    if success and result and result.Name then
+        gameName = result.Name
+    end
+end)
+
+-- Default Settings (Non-configurable without editing the script) - NOW DYNAMIC
+local isAutoTargetEnabled = false -- Default OFF for safety
+local isEspEnabled = false -- Default OFF for safety
+local isFovVisualEnabled = false -- Default OFF for safety
 local targetingFOV = 35
-local currentDelayMode = "Blatant"
+local fovVisualSize = 35 -- Size for the visual FOV circle/expander
+local currentDelayMode = "Blatant" -- "Blatant" for 0ms delay, "Normal" would also be 0 unless modified.
 local shootDelayMilliseconds = 0
-local excludedPlayers = {} -- Key: Player Object, Value: true
+local excludedPlayers = {} -- Players can't be added/removed without a GUI, but the logic is here if needed.
 
---==============================================================================
---|| INTERNAL STATE
---==============================================================================
+-- State Variables
 local lastShotTime = 0
 local currentTool = nil
 local activatedConnection = nil
 local currentEffectiveCooldown = 0
-local gameName = "Unknown Game"
-local lastCount = 0
 
---==============================================================================
---|| HELPER FUNCTIONS
---==============================================================================
-local function safeHttpGet(url) local ok, res = pcall(function() return game:HttpGet(url) end); if ok and res then return true, res end; return false, res end
-local function safeJsonDecode(s) local ok, res = pcall(function() return HttpService:JSONDecode(s) end); if ok then return res end; return nil end
-
-task.spawn(function()
-	local success, result = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
-	if success and result and result.Name then
-		gameName = result.Name
-	end
-end)
-
---==============================================================================
---|| ESP (HIGHLIGHT) LOGIC
---==============================================================================
-function applyHighlight(plr)
-	if plr == player then return end
-	local existing = Storage:FindFirstChild(plr.Name)
-	if existing then existing:Destroy() end
-	local highlight = Instance.new("Highlight", Storage)
-	highlight.Name = plr.Name
-	highlight.FillColor = plr.Team and plr.Team.TeamColor.Color or Color3.fromRGB(255, 255, 255)
-	highlight.FillTransparency = 0.5
-	highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
-	highlight.OutlineTransparency = 0
-	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-	highlight.Enabled = isESPEnabled
-	if plr.Character then highlight.Adornee = plr.Character end
-	plr.CharacterAdded:Connect(function(char) if highlight and highlight.Parent then highlight.Adornee = char end end)
-	plr.CharacterRemoving:Connect(function() if highlight and highlight.Parent then highlight.Adornee = nil end end)
-	return highlight
-end
-
-function removeHighlight(plr)
-	if plr then
-		local existing = Storage:FindFirstChild(plr.Name)
-		if existing then existing:Destroy() end
-	end
-end
-
-function toggleESP(enabled)
-	isESPEnabled = enabled
-	if enabled then
-		for _, plr in pairs(Players:GetPlayers()) do
-			if plr ~= player then
-				local h = Storage:FindFirstChild(plr.Name)
-				if h then h.Enabled = true else applyHighlight(plr) end
-			end
-		end
-	else
-		for _, highlight in pairs(Storage:GetChildren()) do
-			if highlight:IsA("Highlight") then highlight.Enabled = false end
-		end
-	end
-end
-
---==============================================================================
---|| CORE TRIGGERBOT LOGIC
---==============================================================================
+-- Bullet Renderer (optional visual effect from original script)
 local BulletRenderer_upvr = nil
 pcall(function()
 	local modulesFolder = ReplicatedStorage:FindFirstChild("Modules")
@@ -122,6 +61,7 @@ pcall(function()
 	end
 end)
 
+-- Core Functions
 function calculateEffectiveCooldown(toolInstance)
 	if not toolInstance or not toolInstance:IsA("Tool") then return COOLDOWN end
 	local gameCooldown = toolInstance:GetAttribute("Cooldown")
@@ -134,26 +74,51 @@ function getShootEvent()
 end
 
 function findTool()
-	if character then for _, child in pairs(character:GetChildren()) do if child:IsA("Tool") then return child end end end
-	if backpack then for _, child in pairs(backpack:GetChildren()) do if child:IsA("Tool") then return child end end end
+	if character then
+		for _, child in pairs(character:GetChildren()) do
+			if child:IsA("Tool") then return child end
+		end
+	end
+	if backpack then
+		for _, child in pairs(backpack:GetChildren()) do
+			if child:IsA("Tool") then return child end
+		end
+	end
 	return nil
 end
 
 function isVisible(targetCharacter)
 	if not character or not character:FindFirstChild("HumanoidRootPart") then return nil end
 	local startPos = character.HumanoidRootPart.Position
-	local priorityParts = {"HumanoidRootPart", "Head", "LeftHand", "RightHand", "LeftFoot", "RightFoot"}
+	local priorityParts = {"HumanoidRootPart", "LeftHand", "RightHand", "LeftFoot", "RightFoot"}
+	local lastResortPart = "Head"
 	local raycastParams = RaycastParams.new()
-	raycastParams.FilterDescendantsInstances = {character, Storage}
+	raycastParams.FilterDescendantsInstances = {character}
 	raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
 	raycastParams.IgnoreWater = true
+
 	for _, partName in pairs(priorityParts) do
 		local targetPart = targetCharacter:FindFirstChild(partName)
 		if targetPart and targetPart:IsA("BasePart") then
 			local direction = targetPart.Position - startPos
-			if direction.Magnitude > 0.1 then
-				local rayResult = workspace:Raycast(startPos, direction, raycastParams)
-				if rayResult and rayResult.Instance:IsDescendantOf(targetCharacter) then return targetPart end
+			local distance = direction.Magnitude
+			if distance > 0.1 then
+				local rayResult = workspace:Raycast(startPos, direction.Unit * distance, raycastParams)
+				if rayResult and rayResult.Instance:IsDescendantOf(targetCharacter) then
+					return targetPart
+				end
+			end
+		end
+	end
+
+	local headPart = targetCharacter:FindFirstChild(lastResortPart)
+	if headPart and headPart:IsA("BasePart") then
+		local direction = headPart.Position - startPos
+		local distance = direction.Magnitude
+		if distance > 0.1 then
+			local rayResult = workspace:Raycast(startPos, direction.Unit * distance, raycastParams)
+			if rayResult and rayResult.Instance:IsDescendantOf(targetCharacter) then
+				return headPart
 			end
 		end
 	end
@@ -164,19 +129,27 @@ function isWithinFOV(targetPart)
 	if not character or not character:FindFirstChild("HumanoidRootPart") then return false end
 	local cameraCFrame = Camera.CFrame
 	local targetPos = targetPart.Position
-	local vectorToTarget = (targetPos - cameraCFrame.Position).Unit
-	local lookVector = cameraCFrame.LookVector
-	local angle = math.deg(math.acos(math.clamp(vectorToTarget:Dot(lookVector), -1, 1)))
+	local cameraPos = cameraCFrame.Position
+	if (targetPos - cameraPos).Magnitude < 0.1 then return true end
+
+	local directionToTarget = (targetPos - cameraPos).Unit
+	local cameraLook = cameraCFrame.LookVector
+	local dot = math.clamp(directionToTarget:Dot(cameraLook), -1, 1)
+	local angle = math.deg(math.acos(dot))
 	return angle <= (targetingFOV / 2)
 end
 
 function setupToolListener(toolInstance)
 	if activatedConnection then activatedConnection:Disconnect(); activatedConnection = nil end
-	if currentTool and currentTool ~= toolInstance and not currentTool.Enabled then pcall(function() currentTool.Enabled = true end) end
+	if currentTool and currentTool ~= toolInstance and not currentTool.Enabled then
+		pcall(function() currentTool.Enabled = true end)
+	end
+
 	currentTool = toolInstance
 	if toolInstance and toolInstance:IsA("Tool") then
 		local cooldownActive = currentEffectiveCooldown > 0 and (tick() - lastShotTime < currentEffectiveCooldown)
 		pcall(function() toolInstance.Enabled = not cooldownActive end)
+
 		activatedConnection = toolInstance.Activated:Connect(function()
 			lastShotTime = tick()
 			currentEffectiveCooldown = calculateEffectiveCooldown(toolInstance)
@@ -188,23 +161,40 @@ function setupToolListener(toolInstance)
 end
 
 function findClosestEnemy()
-	local maxDistance, closestEnemy, closestVisiblePart, closestDistance = 400, nil, nil, maxDistance
+	local maxDistance = 400
+	local closestEnemy = nil
+	local closestVisiblePart = nil
+	local closestDistance = maxDistance
+
 	local playerRootPart = character and character:FindFirstChild("HumanoidRootPart")
 	if not playerRootPart then return nil, nil end
+
 	local playerRootPos = playerRootPart.Position
 	local myTeam = player.Team
 	if not myTeam then return nil, nil end
+
 	for _, targetPlayer in pairs(Players:GetPlayers()) do
 		if targetPlayer ~= player and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") and targetPlayer.Character:FindFirstChildOfClass("Humanoid") then
-			local targetChar, targetRoot, targetHumanoid, targetTeam = targetPlayer.Character, targetPlayer.Character.HumanoidRootPart, targetPlayer.Character:FindFirstChildOfClass("Humanoid"), targetPlayer.Team
+			local targetChar = targetPlayer.Character
+			local targetRoot = targetChar.HumanoidRootPart
+			local targetHumanoid = targetChar:FindFirstChildOfClass("Humanoid")
+			local targetTeam = targetPlayer.Team
+			
 			local isActualOpponent = false
-			if targetTeam then if (myTeam.Name == "Team1" and targetTeam.Name == "Team2") or (myTeam.Name == "Team2" and targetTeam.Name == "Team1") then isActualOpponent = true end end
+			if targetTeam then
+				if myTeam.Name == "Team1" and targetTeam.Name == "Team2" then isActualOpponent = true
+				elseif myTeam.Name == "Team2" and targetTeam.Name == "Team1" then isActualOpponent = true
+				end
+			end
+
 			if targetHumanoid.Health > 0 and not excludedPlayers[targetPlayer] and isActualOpponent then
 				local distance = (playerRootPos - targetRoot.Position).Magnitude
 				if distance < closestDistance then
 					local visiblePart = isVisible(targetChar)
 					if visiblePart and isWithinFOV(targetRoot) then
-						closestDistance, closestEnemy, closestVisiblePart = distance, targetPlayer, visiblePart
+						closestDistance = distance
+						closestEnemy = targetPlayer
+						closestVisiblePart = visiblePart
 					end
 				end
 			end
@@ -214,201 +204,268 @@ function findClosestEnemy()
 end
 
 function shoot()
-	if not isAutoTargetEnabled or not character or not character.Parent then return end
-	local tool = currentTool or findTool()
-	if not tool or tool.Parent ~= character then setupToolListener(findTool()); return end
+	if not isAutoTargetEnabled then return end
+	if not character or not character.Parent or not character:FindFirstChild("HumanoidRootPart") then return end
+
+	local tool = currentTool
+	if not tool or tool.Parent ~= character then
+		tool = findTool()
+		if tool and tool.Parent == character then setupToolListener(tool) else return end
+	end
+
 	local shootEvent = getShootEvent()
 	if not shootEvent then return end
+
 	local effectiveCooldown = calculateEffectiveCooldown(tool)
 	local currentTime = tick()
 	if currentTime - lastShotTime < effectiveCooldown then return end
+
 	local targetEnemy, visiblePart = findClosestEnemy()
 	if not visiblePart or not targetEnemy or not targetEnemy.Character then return end
-	lastShotTime, currentEffectiveCooldown = currentTime, effectiveCooldown
-	local toolAtDecision, fireSoundAtDecision, bulletTypeAtDecision = tool, tool:FindFirstChild("Fire"), tool:GetAttribute("BulletType")
+
+	lastShotTime = currentTime
+	currentEffectiveCooldown = effectiveCooldown
+
+	local toolAtDecision = tool
+	local fireSoundAtDecision = tool:FindFirstChild("Fire")
+	local bulletTypeAtDecision = tool:GetAttribute("BulletType")
+	local startPosAtDecision
 	local muzzleAttach = tool:FindFirstChild("Muzzle", true)
-	local startPosAtDecision = (muzzleAttach and muzzleAttach.WorldPosition) or character.HumanoidRootPart.Position
+
+	if muzzleAttach and muzzleAttach:IsA("Attachment") then
+		startPosAtDecision = muzzleAttach.WorldPosition
+	else
+		local handle = tool:FindFirstChild("Handle")
+		startPosAtDecision = (handle and handle:IsA("BasePart") and handle.Position) or character.HumanoidRootPart.Position
+	end
+
 	local visiblePartAtDecision = visiblePart
+
 	task.spawn(function()
-		if shootDelayMilliseconds > 0 and currentDelayMode == "Normal" then task.wait(shootDelayMilliseconds / 1000) end
-		if not toolAtDecision or toolAtDecision.Parent ~= character or not targetEnemy or not targetEnemy.Parent or not targetEnemy.Character then return end
+		if shootDelayMilliseconds > 0 then
+			task.wait(shootDelayMilliseconds / 1000)
+		end
+		
+		if not toolAtDecision or toolAtDecision.Parent ~= character then return end
+		if not character or not character.Parent then return end
+		if not targetEnemy or not targetEnemy.Parent or not targetEnemy.Character or not targetEnemy.Character.Parent then return end
+		
 		local targetHumanoid = targetEnemy.Character:FindFirstChildOfClass("Humanoid")
 		if not targetHumanoid or targetHumanoid.Health <= 0 or excludedPlayers[targetEnemy] then return end
-		local endPoint = visiblePartAtDecision.Position
-		local fireArgs = {startPosAtDecision, endPoint, (currentDelayMode == "Blatant" and visiblePartAtDecision or nil), (currentDelayMode == "Blatant" and endPoint or nil)}
-		if pcall(shootEvent.FireServer, shootEvent, unpack(fireArgs)) then
-			if fireSoundAtDecision then pcall(fireSoundAtDecision.Play, fireSoundAtDecision) end
-			if BulletRenderer_upvr and muzzleAttach then pcall(BulletRenderer_upvr, startPosAtDecision, endPoint, bulletTypeAtDecision) end
-			pcall(toolAtDecision.Activate, toolAtDecision); task.wait()
-			if toolAtDecision and toolAtDecision.Parent == character then pcall(function() toolAtDecision.Enabled = false end) end
+
+		local fireArgs = {}
+		local endPointForVisuals = nil
+
+		if currentDelayMode == "Blatant" then
+			local actualHitPart = visiblePartAtDecision
+			local actualImpactPoint = visiblePartAtDecision.Position
+			endPointForVisuals = actualImpactPoint
+			fireArgs = {startPosAtDecision, actualImpactPoint, actualHitPart, actualImpactPoint}
+		else -- Normal (or any other mode)
+			local targetPosition = visiblePartAtDecision.Position
+			endPointForVisuals = targetPosition
+			fireArgs = {startPosAtDecision, targetPosition, nil, nil}
+		end
+		
+		local successFire, errFire = pcall(function()
+			shootEvent:FireServer(unpack(fireArgs))
+		end)
+
+		if successFire then
+			if fireSoundAtDecision and fireSoundAtDecision:IsA("Sound") then
+				pcall(function() fireSoundAtDecision:Play() end)
+			end
+			if BulletRenderer_upvr and muzzleAttach and endPointForVisuals then
+				pcall(BulletRenderer_upvr, startPosAtDecision, endPointForVisuals, bulletTypeAtDecision)
+			end
+			pcall(function() toolAtDecision:Activate() end)
+			task.wait()
+			if toolAtDecision and toolAtDecision.Parent == character then
+				pcall(function() toolAtDecision.Enabled = false end)
+			end
 		end
 	end)
 end
 
---==============================================================================
---|| REMOTE COMMAND ACTIONS
---==============================================================================
-local Commands = {
-	["target_toggle"] = function()
-		isAutoTargetEnabled = not isAutoTargetEnabled
-	end,
-	["esp_toggle"] = function()
-		toggleESP(not isESPEnabled)
-	end,
-	["set_fov"] = function(args)
-		local val = tonumber(args and args[1])
-		if val then targetingFOV = math.clamp(val, 0, 180) end
-	end,
-	["set_delay_mode"] = function(args)
-		local mode = args and args[1] and args[1]:lower()
-		if mode == "blatant" then
-			currentDelayMode = "Blatant"
-			shootDelayMilliseconds = 0 -- Blatant mode always has 0 delay
-		elseif mode == "normal" then
-			currentDelayMode = "Normal"
-		end
-	end,
-	["set_delay_ms"] = function(args)
-		local val = tonumber(args and args[1])
-		if val then shootDelayMilliseconds = math.max(0, val) end
-	end,
-	["exclude_player"] = function(args)
-		local userId = tonumber(args and args[1])
-		if userId then
-			local targetPlayer = Players:GetPlayerByUserId(userId)
-			if targetPlayer then excludedPlayers[targetPlayer] = true end
-		end
-	end,
-	["unexclude_player"] = function(args)
-		local userId = tonumber(args and args[1])
-		if userId then
-			local targetPlayer = Players:GetPlayerByUserId(userId)
-			if targetPlayer then excludedPlayers[targetPlayer] = nil end
-		end
-	end,
-	["clear_exclusions"] = function()
-		excludedPlayers = {}
-	end
+-- Network Commands Table (Specific to Trigger Bot)
+local TriggerBotCommands = {
+    ["trigger_target_on"] = function(args)
+        isAutoTargetEnabled = true
+        print("Trigger Bot: Auto-target enabled.")
+    end,
+    ["trigger_target_off"] = function(args)
+        isAutoTargetEnabled = false
+        print("Trigger Bot: Auto-target disabled.")
+    end,
+    ["trigger_esp_on"] = function(args)
+        isEspEnabled = true
+        print("Trigger Bot: ESP enabled.")
+    end,
+    ["trigger_esp_off"] = function(args)
+        isEspEnabled = false
+        print("Trigger Bot: ESP disabled.")
+    end,
+    ["trigger_fov_set"] = function(args)
+        if args and args[1] then
+            local newFov = tonumber(args[1])
+            if newFov and newFov > 0 then
+                targetingFOV = newFov
+                print("Trigger Bot: FOV set to " .. newFov .. " degrees.")
+            else
+                print("Trigger Bot: Invalid FOV value received.")
+            end
+        else
+            print("Trigger Bot: No FOV value provided in command.")
+        end
+    end,
+    ["trigger_fov_visual_on"] = function(args)
+        isFovVisualEnabled = true
+        print("Trigger Bot: FOV Visual enabled.")
+    end,
+    ["trigger_fov_visual_off"] = function(args)
+        isFovVisualEnabled = false
+        print("Trigger Bot: FOV Visual disabled.")
+    end,
+    ["trigger_fov_size_set"] = function(args)
+        if args and args[1] then
+            local newSize = tonumber(args[1])
+            if newSize and newSize > 0 then
+                fovVisualSize = newSize
+                print("Trigger Bot: FOV Visual Size set to " .. newSize .. ".")
+            else
+                print("Trigger Bot: Invalid FOV Size value received.")
+            end
+        else
+            print("Trigger Bot: No FOV Size value provided in command.")
+        end
+    end,
+    ["rejoin"] = function(args) -- Allow rejoin command for script reload
+        pcall(function()
+            game:GetService("TeleportService"):SetTeleportSetting("AdminSystemReinject", true)
+            game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
+        end)
+    end,
+    -- Add other commands if needed, but primarily focus on trigger-specific ones
 }
 
---==============================================================================
---|| HEARTBEAT SENDER (SENDS STATUS TO SERVER)
---==============================================================================
-task.spawn(function()
-	while true do
-		-- Collect excluded user IDs for the payload
-		local excludedIds = {}
-		for p, _ in pairs(excludedPlayers) do
-			if p and p:IsA("Player") then table.insert(excludedIds, p.UserId) end
-		end
-		
-		-- Create the status payload
-		local triggerbot_status = {
-			enabled = isAutoTargetEnabled,
-			esp = isESPEnabled,
-			fov = targetingFOV,
-			delay_mode = currentDelayMode,
-			delay_ms = shootDelayMilliseconds,
-			exclusions = excludedIds
-		}
-		
-		local payload = {
-			userId = player.UserId,
-			name = player.Name,
-			displayName = player.DisplayName,
-			jobId = game.JobId,
-			ts = os.time(),
-			gameName = gameName,
-			triggerbot_status = triggerbot_status -- The special sauce for the admin panel
-		}
-		
-		if pcall(HttpService.JSONEncode, HttpService, payload) then
-			local jsonPayload = HttpService:JSONEncode(payload)
-			pcall(game.HttpGet, game, SERVER_SEND_URL .. "?text=" .. HttpService:UrlEncode(jsonPayload))
-		end
-		task.wait(HEARTBEAT_INTERVAL)
-	end
+-- Network Command Listener (Modified from Command Receiver)
+pcall(function() 
+    local ok, resp = safeHttpGet(SERVER_READ_URL); 
+    if ok then 
+        local dec = safeJsonDecode(resp); 
+        if type(dec) == "table" then 
+            lastCount = #dec 
+        end 
+    end 
 end)
 
---==============================================================================
---|| COMMAND LISTENER (RECEIVES COMMANDS FROM SERVER)
---==============================================================================
-pcall(function() local ok, resp = safeHttpGet(SERVER_READ_URL); if ok then local dec = safeJsonDecode(resp); if type(dec) == "table" then lastCount = #dec end end end)
+task.spawn(function() 
+    while true do 
+        local ok, resp = safeHttpGet(SERVER_READ_URL); 
+        if ok and resp then 
+            local data = safeJsonDecode(resp); 
+            if type(data) == "table" and #data > lastCount then 
+                for idx = lastCount + 1, #data do 
+                    local cmdData = safeJsonDecode(data[idx] or ""); 
+                    if type(cmdData) == "table" and cmdData.cmd and cmdData.target then 
+                        local commandFunc = TriggerBotCommands[cmdData.cmd:lower()]; 
+                        if commandFunc and (cmdData.target == player.UserId or cmdData.target == "all") then 
+                            pcall(commandFunc, cmdData.args) 
+                        end 
+                    end 
+                end; 
+                lastCount = #data 
+            end 
+        end; 
+        task.wait(POLL_INTERVAL) 
+    end 
+end)
+
+-- Network Heartbeat Sender (Modified from Command Receiver to include script status)
 task.spawn(function()
-	while true do
-		local ok, resp = safeHttpGet(SERVER_READ_URL)
-		if ok and resp then
-			local data = safeJsonDecode(resp)
-			if type(data) == "table" and #data > lastCount then
-				for idx = lastCount + 1, #data do
-					local cmdData = safeJsonDecode(data[idx] or "")
-					if type(cmdData) == "table" and cmdData.cmd and cmdData.target then
-						local commandFunc = Commands[cmdData.cmd:lower()]
-						if commandFunc and (cmdData.target == player.UserId or cmdData.target == "all") then
-							pcall(commandFunc, cmdData.args)
-						end
-					end
-				end
-				lastCount = #data
+    while true do
+        -- Include scriptStatus in the heartbeat payload
+        local payload = {
+            userId = player.UserId, 
+            name = player.Name, 
+            displayName = player.DisplayName, 
+            jobId = game.JobId, 
+            ts = os.time(), 
+            gameName = gameName,
+            scriptStatus = "triggerbot" -- Indicate this client is running the triggerbot module
+        }
+        local ok, jsonPayload = pcall(HttpService.JSONEncode, HttpService, payload)
+        if ok then 
+            pcall(function() game:HttpGet(SERVER_SEND_URL .. "?text=" .. HttpService:UrlEncode(jsonPayload)) end) 
+        end
+        task.wait(HEARTBEAT_INTERVAL)
+    end
+end)
+
+-- Initialization and Listeners
+pcall(function()
+	setupToolListener(findTool())
+	
+	-- Set up listeners for when the player's character is added/changed
+	player.CharacterAdded:Connect(function(newCharacter)
+		character = newCharacter
+		task.wait(0.2)
+		backpack = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 5)
+		setupToolListener(findTool())
+		
+		newCharacter.ChildAdded:Connect(function(child)
+			if child:IsA("Tool") then setupToolListener(child) end
+		end)
+		newCharacter.ChildRemoved:Connect(function(child)
+			if child == currentTool then setupToolListener(nil) end
+		end)
+	end)
+
+	if character then
+		character.ChildAdded:Connect(function(child)
+			if child:IsA("Tool") then setupToolListener(child) end
+		end)
+		character.ChildRemoved:Connect(function(child)
+			if child == currentTool then setupToolListener(nil) end
+		end)
+	end
+
+	-- Update backpack reference if it gets re-added
+	player.ChildAdded:Connect(function(child)
+		if child.Name == "Backpack" and child:IsA("Backpack") then
+			backpack = child
+		end
+	end)
+	
+	-- Main loop
+	RunService.RenderStepped:Connect(function(dt)
+		if not character or not character.Parent then
+			character = player.Character
+			if not character then return end
+		end
+
+		local currentlyEquippedTool = character and character:FindFirstChildOfClass("Tool")
+		if currentlyEquippedTool ~= currentTool then
+			setupToolListener(currentlyEquippedTool)
+		end
+		
+		if currentTool and not currentTool.Enabled and currentEffectiveCooldown > 0 then
+			if tick() - lastShotTime >= currentEffectiveCooldown then
+				pcall(function() currentTool.Enabled = true end)
+				currentEffectiveCooldown = 0
 			end
 		end
-		task.wait(POLL_INTERVAL)
-	end
+		
+		pcall(shoot)
+	end)
 end)
 
---==============================================================================
---|| INITIALIZATION & MAIN LOOP
---==============================================================================
--- Initial setup
-setupToolListener(findTool())
-toggleESP(isESPEnabled) -- Ensure ESP starts in its default state
-
--- Setup listeners for new/leaving players (for ESP)
-Players.PlayerAdded:Connect(function(newPlayer)
-	if isESPEnabled then applyHighlight(newPlayer) end
-end)
-Players.PlayerRemoving:Connect(function(leavingPlayer)
-	excludedPlayers[leavingPlayer] = nil
-	removeHighlight(leavingPlayer)
-end)
-
--- Initialize ESP for existing players
-for _, p in pairs(Players:GetPlayers()) do
-	if p ~= player then applyHighlight(p) end
+-- Cleanup logic for when the script is destroyed
+if script and script:IsA("Script") then
+	script.Destroying:Connect(function()
+		if currentTool and currentTool.Parent and not currentTool.Enabled then
+			pcall(function() currentTool.Enabled = true end)
+		end
+		if activatedConnection then activatedConnection:Disconnect(); activatedConnection = nil end
+	end)
 end
-
--- Setup listeners for character and tool changes
-player.CharacterAdded:Connect(function(newCharacter)
-	character = newCharacter
-	task.wait(0.2)
-	backpack = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 5)
-	setupToolListener(findTool())
-	newCharacter.ChildAdded:Connect(function(child) if child:IsA("Tool") then setupToolListener(child) end end)
-	newCharacter.ChildRemoved:Connect(function(child) if child == currentTool then setupToolListener(nil) end end)
-end)
-
-if character then
-	character.ChildAdded:Connect(function(child) if child:IsA("Tool") then setupToolListener(child) end end)
-	character.ChildRemoved:Connect(function(child) if child == currentTool then setupToolListener(nil) end end)
-end
-
-player.ChildAdded:Connect(function(child) if child.Name == "Backpack" and child:IsA("Backpack") then backpack = child end end)
-
--- The main loop that runs every frame
-RunService.RenderStepped:Connect(function()
-	if not character or not character.Parent then character = player.Character; if not character then return end end
-	local currentlyEquippedTool = character and character:FindFirstChildOfClass("Tool")
-	if currentlyEquippedTool ~= currentTool then setupToolListener(currentlyEquippedTool) end
-	if currentTool and not currentTool.Enabled and currentEffectiveCooldown > 0 and (tick() - lastShotTime >= currentEffectiveCooldown) then
-		pcall(function() currentTool.Enabled = true end)
-		currentEffectiveCooldown = 0
-	end
-	pcall(shoot)
-end)
-
--- Cleanup logic
-script.Destroying:Connect(function()
-	if currentTool and currentTool.Parent and not currentTool.Enabled then pcall(function() currentTool.Enabled = true end) end
-	if activatedConnection then activatedConnection:Disconnect(); activatedConnection = nil end
-	if Storage and Storage.Parent then Storage:Destroy() end
-end)
