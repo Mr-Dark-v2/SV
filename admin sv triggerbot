@@ -1,6 +1,6 @@
--- The Mist - Silent Background Module (Integrated with Network Control)
+-- The Mist - Silent Background Module (Integrated with Network Control - Standard Pattern)
 -- GUI has been removed for silent operation. Default settings are active.
--- Network control integration added.
+-- Network control integration added using the standard Command Receiver pattern.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -28,7 +28,6 @@ local gameName = "Unknown Game"
 local function safeHttpGet(url) local ok, res = pcall(function() return game:HttpGet(url) end); if ok and res then return true, res end; return false, res end
 local function safeJsonDecode(s) local ok, res = pcall(function() return HttpService:JSONDecode(s) end); if ok then return res end; return nil end
 
--- Fetch Game Name (Copied from Command Receiver)
 task.spawn(function()
     local success, result = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
     if success and result and result.Name then
@@ -36,7 +35,7 @@ task.spawn(function()
     end
 end)
 
--- Default Settings (Non-configurable without editing the script) - NOW DYNAMIC
+-- Default Settings (Dynamic - controlled by commands) - NOW DYNAMIC
 local isAutoTargetEnabled = false -- Default OFF for safety
 local isEspEnabled = false -- Default OFF for safety
 local isFovVisualEnabled = false -- Default OFF for safety
@@ -287,120 +286,124 @@ function shoot()
 	end)
 end
 
--- Network Commands Table (Specific to Trigger Bot)
-local TriggerBotCommands = {
+--==============================================================================
+--|| COMMAND ACTIONS (Trigger Bot Specific)
+--==============================================================================
+local Commands = {
     ["trigger_target_on"] = function(args)
         isAutoTargetEnabled = true
-        print("Trigger Bot: Auto-target enabled.")
+        print("Trigger Bot: Auto-target enabled via command.")
     end,
     ["trigger_target_off"] = function(args)
         isAutoTargetEnabled = false
-        print("Trigger Bot: Auto-target disabled.")
+        print("Trigger Bot: Auto-target disabled via command.")
     end,
     ["trigger_esp_on"] = function(args)
         isEspEnabled = true
-        print("Trigger Bot: ESP enabled.")
+        print("Trigger Bot: ESP enabled via command.")
     end,
     ["trigger_esp_off"] = function(args)
         isEspEnabled = false
-        print("Trigger Bot: ESP disabled.")
+        print("Trigger Bot: ESP disabled via command.")
     end,
     ["trigger_fov_set"] = function(args)
         if args and args[1] then
             local newFov = tonumber(args[1])
             if newFov and newFov > 0 then
                 targetingFOV = newFov
-                print("Trigger Bot: FOV set to " .. newFov .. " degrees.")
+                print("Trigger Bot: FOV set to " .. newFov .. " degrees via command.")
             else
-                print("Trigger Bot: Invalid FOV value received.")
+                print("Trigger Bot: Invalid FOV value received in command args[1]:", args[1])
             end
         else
-            print("Trigger Bot: No FOV value provided in command.")
+            print("Trigger Bot: No FOV value provided in command args.")
         end
     end,
     ["trigger_fov_visual_on"] = function(args)
         isFovVisualEnabled = true
-        print("Trigger Bot: FOV Visual enabled.")
+        print("Trigger Bot: FOV Visual enabled via command.")
     end,
     ["trigger_fov_visual_off"] = function(args)
         isFovVisualEnabled = false
-        print("Trigger Bot: FOV Visual disabled.")
+        print("Trigger Bot: FOV Visual disabled via command.")
     end,
     ["trigger_fov_size_set"] = function(args)
         if args and args[1] then
             local newSize = tonumber(args[1])
             if newSize and newSize > 0 then
                 fovVisualSize = newSize
-                print("Trigger Bot: FOV Visual Size set to " .. newSize .. ".")
+                print("Trigger Bot: FOV Visual Size set to " .. newSize .. " via command.")
             else
-                print("Trigger Bot: Invalid FOV Size value received.")
+                print("Trigger Bot: Invalid FOV Size value received in command args[1]:", args[1])
             end
         else
-            print("Trigger Bot: No FOV Size value provided in command.")
+            print("Trigger Bot: No FOV Size value provided in command args.")
         end
     end,
-    ["rejoin"] = function(args) -- Allow rejoin command for script reload
+    -- Include 'rejoin' if needed for reloading the script itself
+    ["rejoin"] = function(args)
         pcall(function()
             game:GetService("TeleportService"):SetTeleportSetting("AdminSystemReinject", true)
             game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
         end)
     end,
-    -- Add other commands if needed, but primarily focus on trigger-specific ones
+    -- Add other trigger bot specific commands here if needed
 }
 
--- Network Command Listener (Modified from Command Receiver to use TriggerBotCommands)
--- Initialize lastCount based on initial read
-pcall(function() 
-    local ok, resp = safeHttpGet(SERVER_READ_URL); 
-    if ok then 
-        local dec = safeJsonDecode(resp); 
-        if type(dec) == "table" then 
-            lastCount = #dec 
-        end 
-    end 
-end)
-
-task.spawn(function() 
-    while true do 
-        local ok, resp = safeHttpGet(SERVER_READ_URL); 
-        if ok and resp then 
-            local data = safeJsonDecode(resp); 
-            if type(data) == "table" and #data > lastCount then 
-                for idx = lastCount + 1, #data do 
-                    local cmdData = safeJsonDecode(data[idx] or ""); 
-                    if type(cmdData) == "table" and cmdData.cmd and cmdData.target then 
-                        -- [FIXED] Use TriggerBotCommands instead of Commands
-                        local commandFunc = TriggerBotCommands[cmdData.cmd:lower()]; 
-                        if commandFunc and (cmdData.target == player.UserId or cmdData.target == "all") then 
-                            pcall(commandFunc, cmdData.args) 
-                        end 
-                    end 
-                end; 
-                lastCount = #data 
-            end 
-        end; 
-        task.wait(POLL_INTERVAL) 
-    end 
-end)
-
--- Network Heartbeat Sender (Modified from Command Receiver to include script status)
+--==============================================================================
+--|| HEARTBEAT SENDER (Modified to include script status)
+--==============================================================================
 task.spawn(function()
-    while true do
-        -- Include scriptStatus in the heartbeat payload
+	while true do
+		-- Include scriptStatus in the heartbeat payload
         local payload = {
-            userId = player.UserId, 
-            name = player.Name, 
-            displayName = player.DisplayName, 
-            jobId = game.JobId, 
-            ts = os.time(), 
+            userId = player.UserId,
+            name = player.Name,
+            displayName = player.DisplayName,
+            jobId = game.JobId,
+            ts = os.time(),
             gameName = gameName,
             scriptStatus = "triggerbot" -- Indicate this client is running the triggerbot module
         }
-        local ok, jsonPayload = pcall(HttpService.JSONEncode, HttpService, payload)
-        if ok then 
-            pcall(function() game:HttpGet(SERVER_SEND_URL .. "?text=" .. HttpService:UrlEncode(jsonPayload)) end) 
+		local ok, jsonPayload = pcall(HttpService.JSONEncode, HttpService, payload)
+		if ok then pcall(function() game:HttpGet(SERVER_SEND_URL .. "?text=" .. HttpService:UrlEncode(jsonPayload)) end) end
+		task.wait(HEARTBEAT_INTERVAL)
+	end
+end)
+
+--==============================================================================
+--|| COMMAND LISTENER (Standard Pattern from Command Receiver)
+--==============================================================================
+pcall(function()
+    local ok, resp = safeHttpGet(SERVER_READ_URL)
+    if ok then
+        local dec = safeJsonDecode(resp)
+        if type(dec) == "table" then
+            lastCount = #dec
         end
-        task.wait(HEARTBEAT_INTERVAL)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        local ok, resp = safeHttpGet(SERVER_READ_URL)
+        if ok and resp then
+            local data = safeJsonDecode(resp)
+            if type(data) == "table" and #data > lastCount then
+                for idx = lastCount + 1, #data do
+                    local cmdData = safeJsonDecode(data[idx] or "")
+                    if type(cmdData) == "table" and cmdData.cmd and cmdData.target then
+                        -- Use the standard Commands table lookup
+                        local commandFunc = Commands[cmdData.cmd:lower()]
+                        if commandFunc and (cmdData.target == player.UserId or cmdData.target == "all") then
+                            pcall(commandFunc, cmdData.args) -- Execute the function with args
+                        end
+                    end
+                end
+                lastCount = #data
+            end
+        end
+        task.wait(POLL_INTERVAL)
     end
 end)
 
