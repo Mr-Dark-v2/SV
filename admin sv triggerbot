@@ -348,7 +348,8 @@ local TriggerBotCommands = {
     -- Add other commands if needed, but primarily focus on trigger-specific ones
 }
 
--- Network Command Listener (Modified from Command Receiver)
+-- Network Command Listener (Modified from Command Receiver to use TriggerBotCommands)
+-- Initialize lastCount based on initial read
 pcall(function() 
     local ok, resp = safeHttpGet(SERVER_READ_URL); 
     if ok then 
@@ -368,6 +369,7 @@ task.spawn(function()
                 for idx = lastCount + 1, #data do 
                     local cmdData = safeJsonDecode(data[idx] or ""); 
                     if type(cmdData) == "table" and cmdData.cmd and cmdData.target then 
+                        -- [FIXED] Use TriggerBotCommands instead of Commands
                         local commandFunc = TriggerBotCommands[cmdData.cmd:lower()]; 
                         if commandFunc and (cmdData.target == player.UserId or cmdData.target == "all") then 
                             pcall(commandFunc, cmdData.args) 
